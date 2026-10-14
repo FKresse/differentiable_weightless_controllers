@@ -20,6 +20,70 @@ import numpy as np
 from wnn_models import WNN
 import re
 from pathlib import Path
+import struct
+from pathlib import Path
+import numpy as np
+import torch
+
+
+def float32_to_hex(f: float) -> str:
+    """Return IEEE-754 float32 bit pattern as Verilog hex literal string body."""
+    return struct.pack(">f", np.float32(f)).hex().upper()
+
+
+def export_fp32_inputs(obs: torch.Tensor, out_path: str) -> None:
+    """
+    Save one observation vector as decimal float32 values, one line.
+    """
+    obs_np = obs.detach().cpu().to(torch.float32).numpy().reshape(-1)
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    np.savetxt(out_path, obs_np[None, :], fmt="%.8f")
+    print(f"Wrote FP32 inputs to {out_path}")
+
+
+def export_fp32_pkg(
+    scales: torch.Tensor,
+    out_path: str,
+    package_name: str = "fp32_pkg",
+    mul_latency: int = 9,
+    to_int_latency: int = 7,
+    doc: str = "Auto-generated FP32 quantization scales.",
+) -> None:
+    """
+    Export per-observation FP32 scales to a SystemVerilog package.
+
+    scales: shape [obs_dim]
+    """
+    scales = scales.detach().cpu().to(torch.float32).reshape(-1)
+    obs_dim = int(scales.numel())
+
+    lines = []
+    lines.append("`timescale 1ns/1ps")
+    lines.append("")
+    lines.append(f"package {package_name};")
+    lines.append("")
+    lines.append(f"  localparam int OBS = {obs_dim};")
+    lines.append(f"  // {doc}")
+    lines.append(f"  localparam int FP32_MUL_LATENCY    = {mul_latency};")
+    lines.append(f"  localparam int FP32_TO_INT_LATENCY = {to_int_latency};")
+    lines.append("")
+    lines.append("  localparam logic [31:0] OBS_SCALES [0:OBS-1] = '{")
+
+    for i, s in enumerate(scales.tolist()):
+        hex32 = float32_to_hex(s)
+        comma = "," if i < obs_dim - 1 else ""
+        lines.append(f"      32'h{hex32}{comma} // obs {i} : {s:.8g}")
+
+    lines.append("  };")
+    lines.append("")
+    lines.append(f"endpackage : {package_name}")
+    lines.append("")
+
+    out_file = Path(out_path)
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text("\n".join(lines))
+    print(f"Wrote FP32 scale package to {out_path}")
+    
 @torch.no_grad()
 def evaluate_actor_obs(
     actor: nn.Module,
@@ -609,11 +673,28 @@ def main():
         out_np = outputs.to(torch.int64).cpu().numpy()
         print(inp_np)
         print(out_np)
+        
+        
         np.savetxt(f"{final_path}/inputs_0.txt",  inp_np, fmt="%d")
         np.savetxt(f"{final_path}/outputs_0.txt", out_np, fmt="%d")
         write_identity_mem("/nfs/scistore16/tomgrp/fkresse/difflogic/release_dwc/hdl/verilog/identity_8b.mem",
                            int(group_sum_bits),
                            8)
         print(group_sum_bits)
+        export_fp32_inputs(
+            first_observation,
+            f"{final_path}/inputs_fp32_0.txt",
+        )
+
+        # New FP32 scale package export
+        export_fp32_pkg(
+            1.0/quantizer.scale,
+            f"{final_path}/fp32_pkg.svh",
+            package_name="fp32_pkg",
+            mul_latency=9,
+            to_int_latency=7,
+            doc=f"Auto-generated FP32 quantization scales for {args.env}.",
+        )
+
 if __name__ == "__main__":
     main()
