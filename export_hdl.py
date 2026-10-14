@@ -612,7 +612,7 @@ def main():
     print(new_thresholds)
     export_thresholds_to_svh(
         new_thresholds,
-        out_path=f"hdl/verilog/pkg/{env_name}/256/threshold_pkg.svh",
+        out_path=f"{final_path}/threshold_pkg.svh",
         package_name="threshold_pkg",
         param_name="NORMALIZATION_THRESHOLDS",
     )
