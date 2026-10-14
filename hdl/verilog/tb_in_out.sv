@@ -11,30 +11,31 @@ module tb_in_out;
 
   logic clk = 0;
   always #5 clk = ~clk; // 100 MHz
-
+  localparam int HARDWARE_ACTION_BITWIDTH = 8;
   // ------------------------------------------------------------------//
   //  Signals to / from DUT
   // ------------------------------------------------------------------//
-  logic [0:core_pkg::ENCODE_OBS_BIT_WIDTH-1] obs [0:core_pkg::OBS-1];   // inputs
-  logic [0:ACTION_BITWIDTH-1]                act [0:ACTIONS-1];         // outputs
-  logic [0:core_pkg::OBS*core_pkg::BITS_PER_OBS-1] thermo_bus;
+  // logic [0:core_pkg::ENCODE_OBS_BIT_WIDTH-1] obs [0:core_pkg::OBS-1];   // inputs
+  logic signed [0:core_pkg::RAW_OBS_BIT_WIDTH-1] obs [0:core_pkg::OBS-1];
+  logic [0:HARDWARE_ACTION_BITWIDTH-1]                act [0:ACTIONS-1];         // outputs
+  // logic [0:core_pkg::OBS*core_pkg::BITS_PER_OBS-1] thermo_bus;
   // ------------------------------------------------------------------//
   //  Device Under Test
   // ------------------------------------------------------------------//
 
-  thermo_encode #(
-    .OBS       (core_pkg::OBS),
-    .BITS_PER_OBS(core_pkg::BITS_PER_OBS)
-    ) u_enc (
-        .quant_in   (obs),
-        .thermo_out (thermo_bus)
-  );
+  //thermo_encode #(
+  //  .OBS       (core_pkg::OBS),
+  //  .BITS_PER_OBS(core_pkg::BITS_PER_OBS)
+  //  ) u_enc (
+  //      .quant_in   (obs),
+  //      .thermo_out (thermo_bus)
+  //);
     
   dwn_top dut (
     .clk       (clk),
     .rstn      (1'b1),
-    .in_bus    (thermo_bus),
-    .group_sum (act)
+    .in_bus    (obs),
+    .group_sum_bram (act)
   );
 
 
@@ -89,8 +90,8 @@ module tb_in_out;
   // ------------------------------------------------------------------//
   //  TB variables (declare BEFORE initial block)
   // ------------------------------------------------------------------//
-  string  IN_FILE  = "/nfs/scistore16/tomgrp/fkresse/difflogic/release_dwc/hdl/verilog/pkg/HalfCheetah/128/inputs.txt";
-  string  OUT_FILE = "/nfs/scistore16/tomgrp/fkresse/difflogic/release_dwc/hdl/verilog/pkg/HalfCheetah/128/outputs.txt";
+  string  IN_FILE  = "/nfs/scistore16/tomgrp/fkresse/difflogic/release_dwc/hdl/verilog/pkg/HalfCheetah/256/inputs_0.txt";
+  string  OUT_FILE = "/nfs/scistore16/tomgrp/fkresse/difflogic/release_dwc/hdl/verilog/pkg/HalfCheetah/256/outputs_0.txt";
 
   integer fin, fout;
   integer eof_in, eof_out;
@@ -103,7 +104,7 @@ module tb_in_out;
   int actual;              // temp for comparisons
 
   // pattern array is same shape/type as obs, so we can assign directly
-  logic [0:core_pkg::ENCODE_OBS_BIT_WIDTH-1] pattern [0:core_pkg::OBS-1];
+  logic signed [0:core_pkg::RAW_OBS_BIT_WIDTH-1] pattern [0:core_pkg::OBS-1];
 
   // ------------------------------------------------------------------//
   //  Stimulus + checker
@@ -127,7 +128,7 @@ module tb_in_out;
           eof_in = 1;
           break;
         end
-        obs[oi] = tmp;  // assign explicitly to the packed vector
+        obs[oi] = $signed(tmp);  // assign explicitly to the packed vector
       end
       if (eof_in) break;
 

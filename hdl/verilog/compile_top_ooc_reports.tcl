@@ -30,7 +30,8 @@ read_verilog -sv dwn_group_sum_pipelined.sv
 read_verilog -sv dwn_top_ooc.sv
 read_verilog -sv mapping_layer.sv
 read_verilog -sv thermo_encode.sv
-
+read_verilog -sv thermo_encode_thresholded.sv
+read_verilog -sv identity_lookup_bram.sv
 
 read_xdc dwn_top.xdc
 

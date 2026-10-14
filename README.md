@@ -89,25 +89,46 @@ chmod +x setup_vivado.sh
 Convert a trained model to Verilog:
 
 ```bash
-python export_hdl.py --path=PATH_TO_MODEL
+python export_hdl.py --path=PATH_TO_MODEL --env=HalfCheetah-v4 --input_quantization_bits=12
 ```
-This populates hdl/verilog/pkg with:
+This populates `hdl/verilog/pkg/<Env>/<size>` with:
 
-* .pkg: Network parameters (LUT contents, connections).
+* `core_pkg.svh`: Network parameters (LUT contents, connections, input width).
+* `threshold_pkg.svh`: the integer thresholds of the input encoder.
 * Test Vectors: Input/output files for testing.
 
+To export the five models of the paper at once (`MODEL_DIR` holds `model_sac_<Env>-v4_256_63_<seed>_6.pth`):
+
+```bash
+./perform_export.bash MODEL_DIR 12
+```
+
+### Fixed-point input encoder
+The hardware reads each observation as a signed fixed-point integer of
+`--input_quantization_bits` bits (`RAW_OBS_BIT_WIDTH` in `core_pkg.svh`, default 8).
+The registered inputs are compared against one integer
+threshold per thermometer bit (`thermo_encode_thresholded.sv`), so the thermometer
+encoding happens in hardware and no float arithmetic is needed.
+
+* Quantization is symmetric per observation dimension: `q = clip(round(x / s), -qmax, qmax)`
+  with `qmax = 2^(N-1) - 1` and `s = abs_max / qmax`.
+* `abs_max` is read from `data/abs_max_<Env>-v4.npy` (1.2 times the largest absolute
+  observation seen in evaluation rollouts, written by `run_evals.py`).
+* The thermometer thresholds, which live on normalized observations, are mapped back to
+  raw observations (`t * std + mean`), divided by `s`, floored and clipped to `[-qmax, qmax]`.
+
 ## Simulation
-*Note*: Update `IN_FILE` and `OUT_FILE` in `tb_in_out.sv` (lines 92-93) to point to your generated test vectors before running.
+*Note*: Update `IN_FILE` and `OUT_FILE` in `tb_in_out.sv` (lines 93-94) to point to your generated test vectors before running.
 
 Compile the design (ensure `-i` points to your specific package folder):
 ```bash
 cd hdl/verilog
-xvlog -sv   -i .   -i pkg/HalfCheetah/128   dwn_lut_layer.sv   dwn_group_sum_pipelined.sv   mapping_layer.sv   dwn_top_ooc.sv   thermo_encode.sv   tb_in_out.sv
+xvlog -sv   -i .   -i pkg/HalfCheetah/256   dwn_lut_layer.sv   dwn_group_sum_pipelined.sv   mapping_layer.sv   dwn_top_ooc.sv   thermo_encode_thresholded.sv   identity_lookup_bram.sv   tb_in_out.sv
 ```
 
 Run simulation:
 ```bash
-xelab tb_in_out -R -debug typical -L unisims_ver
+xelab tb_in_out -R -debug typical -L xpm -L unisims_ver
 ```
 
 This should return `pass`.

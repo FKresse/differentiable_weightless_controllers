@@ -4,18 +4,24 @@
 
 
 module dwn_top #(
-    parameter int PIPE_STAGES = 4  // 0, 1, or 2 internal pipeline stages
+    parameter int PIPE_STAGES = 4,
+    parameter int HARDWARE_ACTION_BITWIDTH = 8  // 0, 1, or 2 internal pipeline stages
 )(
     input  logic clk,
     input  logic rstn,
     // input  logic [0:core_pkg::ENCODE_OBS_BIT_WIDTH-1] in_bus [0:core_pkg::OBS-1],
-    input logic [0:core_pkg::OBS*core_pkg::BITS_PER_OBS-1] in_bus,
-    output logic [0:core_pkg::ACTION_BITWIDTH-1] group_sum [0:core_pkg::ACTIONS-1]
+    //input  logic [0:core_pkg::ENCODE_OBS_BIT_WIDTH-1] in_bus [0:core_pkg::OBS-1],
+    input logic signed [0:core_pkg::RAW_OBS_BIT_WIDTH-1] in_bus [0:core_pkg::OBS-1],
+    //output logic [0:core_pkg::ACTION_BITWIDTH-1] group_sum [0:core_pkg::ACTIONS-1]
+    output logic [0:HARDWARE_ACTION_BITWIDTH-1] group_sum_bram [0:core_pkg::ACTIONS-1]
 );
     import core_pkg::*;
 
     // ── Front‑end: comparators ───────────────────────────────────
     // ── Boolean policy network ──────────────────────────────────
+    logic [0:core_pkg::OBS*core_pkg::BITS_PER_OBS-1] thermo_bus;
+    // logic [0:core_pkg::ENCODE_OBS_BIT_WIDTH-1] in_reg [0:OBS-1];
+    logic signed [0:core_pkg::RAW_OBS_BIT_WIDTH-1] in_reg [0:core_pkg::OBS-1];
 
     logic [0:INPUTS_LUT-1] luts_mapped_to_layer0 [0:LUTS-1]; // LUT inputs
     logic [0:INPUTS_LUT-1] luts_mapped_to_layer0_pipe [0:LUTS-1];
@@ -25,9 +31,11 @@ module dwn_top #(
     logic [0:LUTS-1] internal_bits_layer0; // LUT outputs
     logic [0:LUTS-1]       internal_bits_layer0_pipe;  // after optional pipe
 
+    logic [0:core_pkg::ACTION_BITWIDTH-1] group_sum [0:core_pkg::ACTIONS-1];
+    
     logic [0:LAST_LUTS-1] output_bits; // LUT outputs
     logic [0:LAST_LUTS-1] output_bits_r; // LUT outputs
-    logic [0:core_pkg::OBS*core_pkg::BITS_PER_OBS-1] thermo_bus;
+    //logic [0:core_pkg::OBS*core_pkg::BITS_PER_OBS-1] thermo_bus;
 
     // logic [0:LUTS-1] internal_bits_layer0_r; // existing
     // logic [0:LUTS-1] output_bits_r;                              // NEW FF
@@ -39,15 +47,36 @@ module dwn_top #(
     logic [0:OBS*BITS_PER_OBS-1] thermo_bus_r;   
 
 
-    logic [0:ENCODE_OBS_BIT_WIDTH-1] in_reg [0:OBS-1];
-
-    // INPUT REGISTER
+    // logic [0:ENCODE_OBS_BIT_WIDTH-1] in_reg [0:OBS-1];
+    // Register the input
     always_ff @(posedge clk or negedge rstn) begin
         if (!rstn)
-            foreach (thermo_bus[i])  thermo_bus[i] <= '0;
+            foreach (in_reg[i]) in_reg[i] <= '0;
         else
-            foreach (thermo_bus[i])  thermo_bus[i] <= in_bus[i];
+            foreach (in_reg[i]) in_reg[i] <= in_bus[i];
     end
+    //thermo_encode #(
+    //    .OBS          (OBS),
+    //    .BITS_PER_OBS (BITS_PER_OBS)
+    //) u_enc (
+    //    .quant_in   (in_reg),
+    //    .thermo_out (thermo_bus)
+    //);
+    thermo_encode_thresholded #(
+        .OBS          (OBS),
+        .BITS_PER_OBS (BITS_PER_OBS),
+        .X            (RAW_OBS_BIT_WIDTH)
+    ) u_enc (
+        .quant_in   (in_reg),
+        .thermo_out (thermo_bus)
+    );
+    // INPUT REGISTER
+    //always_ff @(posedge clk or negedge rstn) begin
+    //    if (!rstn)
+    //        foreach (thermo_bus[i])  thermo_bus[i] <= '0;
+    //    else
+    //        foreach (thermo_bus[i])  thermo_bus[i] <= in_bus[i];
+    //end
 
 
     //#thermo_encode #(
@@ -188,5 +217,19 @@ module dwn_top #(
             foreach (group_sum[i])  group_sum[i] <= group_sum_int[i];
     end
 
+    
 
+    genvar a;
+    generate
+    for (a = 0; a < ACTIONS; a++) begin : G_BRAM
+        identity_lookup_bram #(
+        .ADDR_W(ACTION_BITWIDTH),
+        .DATA_W(HARDWARE_ACTION_BITWIDTH)
+        ) u_lookup (
+        .clk (clk),
+        .addr(group_sum[a]),
+        .dout(group_sum_bram[a])
+        );
+    end
+    endgenerate
 endmodule

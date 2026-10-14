@@ -99,9 +99,82 @@ class Args:
     """When to enable quantization"""
     ptq_calibration: bool = True
     """If used, warmup can be performed (use always)"""
+    fake_quantize_obs: bool = False
     
-    
-def make_env(env_id, seed, idx, capture_video, run_name, disable_ctrl_cost=False):
+import numpy as np
+import gymnasium as gym
+
+
+class FakeQuantizeObservation(gym.ObservationWrapper):
+    def __init__(
+        self,
+        env,
+        n_bits=8,
+        eps=1e-8,
+        initial_abs_max=None,
+        update_scale=True,
+    ):
+        super().__init__(env)
+        self.eps = eps
+        self.update_scale = update_scale
+        self.qmax = 2 ** (n_bits - 1) - 1  # 127 for int8 symmetric
+        self.initial_abs_max = initial_abs_max
+        self.running_abs_max = None
+
+        self.observation_space = gym.spaces.Box(
+            low=self.env.observation_space.low,
+            high=self.env.observation_space.high,
+            shape=self.env.observation_space.shape,
+            dtype=np.float32,
+        )
+
+    def _init_if_needed(self, obs):
+        if self.running_abs_max is not None:
+            return
+
+        if self.initial_abs_max is None:
+            self.running_abs_max = np.full_like(obs, self.eps, dtype=np.float32)
+        else:
+            init = np.asarray(self.initial_abs_max, dtype=np.float32)
+            if init.shape != obs.shape:
+                raise ValueError(
+                    f"initial_abs_max shape {init.shape} does not match obs shape {obs.shape}"
+                )
+            self.running_abs_max = np.maximum(init, self.eps)
+
+    def _update_scale(self, obs):
+        if self.update_scale:
+            self.running_abs_max = np.maximum(self.running_abs_max, np.abs(obs))
+
+    def observation(self, obs):
+        obs = np.asarray(obs, dtype=np.float32)
+
+        self._init_if_needed(obs)
+        self._update_scale(obs)
+        #print('obs:', obs)
+        #print(self.running_abs_max)
+        scale = np.maximum(self.running_abs_max / self.qmax, self.eps)
+        q = np.round(obs / scale)
+        q = np.clip(q, -self.qmax, self.qmax)
+        dequantized = q * scale
+        #print(dequantized)
+        return dequantized.astype(np.float32)
+
+    def get_abs_max(self):
+        return self.running_abs_max.copy()
+
+    def set_abs_max(self, value, update_scale=False):
+        value = np.asarray(value, dtype=np.float32)
+        if value.shape != self.observation_space.shape:
+            raise ValueError(
+                f"set_abs_max got shape {value.shape}, expected {self.observation_space.shape}"
+            )
+        self.running_abs_max = np.maximum(value, self.eps)
+        self.update_scale = update_scale
+        
+        
+def make_env(env_id, seed, idx, capture_video, run_name, disable_ctrl_cost=False,
+             fake_quantize_obs=False):
     env_kwargs = {}
     if disable_ctrl_cost:
         print("Disabling control cost in the environment.")
@@ -113,6 +186,13 @@ def make_env(env_id, seed, idx, capture_video, run_name, disable_ctrl_cost=False
         else:
             env = gym.make(env_id, **env_kwargs)
         env = gym.wrappers.RecordEpisodeStatistics(env)
+        if fake_quantize_obs:
+            print("Enabled Fake quantization of observations with 8 bits.")
+            env = FakeQuantizeObservation(
+                env,
+                n_bits=8,
+            )
+
         env.action_space.seed(seed)
         return env
 
@@ -354,10 +434,18 @@ def evaluate_actor(
     record_stats: bool = True,
     global_step = None,
     writer=None,
+    fake_quantize_obs: bool = False,
+    quantize_initial_abs_max=None,
 ):
     eval_env = gym.make(env_id)
     eval_env = gym.wrappers.RecordEpisodeStatistics(eval_env)
-
+    if fake_quantize_obs:
+        eval_env = FakeQuantizeObservation(
+            eval_env,
+            n_bits=8,
+            initial_abs_max=quantize_initial_abs_max,
+            update_scale=False,  # frozen during eval
+        )
     actor.eval()  # important: turn off dropout, etc.
     returns = []
     lengths = []
@@ -423,7 +511,8 @@ if __name__ == "__main__":
         "hyperparameters",
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
-
+    # assert number of enviroments is one
+    assert args.num_envs == 1, "only one environment is supported due to the quantizer of the inputs for the rebutal, set num_envs to 1"
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -434,8 +523,9 @@ if __name__ == "__main__":
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name) for i in range(args.num_envs)]
+        [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name, fake_quantize_obs=args.fake_quantize_obs) for i in range(args.num_envs)]
     )
+    
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
     max_action = float(envs.single_action_space.high[0])
@@ -515,6 +605,7 @@ if __name__ == "__main__":
         if obs_norm is not None:
             obs_norm.update(next_obs_t)
 
+        #exit()
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
         real_next_obs = next_obs.copy()
@@ -610,10 +701,10 @@ if __name__ == "__main__":
                     writer.add_scalar("losses/alpha_loss", alpha_loss.item(), global_step)
         eval_every = args.total_timesteps // 20
         if global_step % eval_every == 0:
-           evaluate_actor(actor, args.env_id, obs_norm, device=device, writer=writer, global_step=global_step+1, episodes=10)
+           evaluate_actor(actor, args.env_id, obs_norm, device=device, writer=writer, global_step=global_step+1, episodes=10, fake_quantize_obs=args.fake_quantize_obs, quantize_initial_abs_max =[env.get_wrapper_attr("running_abs_max") for env in envs.envs][0] if args.fake_quantize_obs else None)
         # if last step, do final eval for 1000 episodes
         if global_step == args.total_timesteps - 1:
-            evaluate_actor(actor, args.env_id, obs_norm, device=device, writer=writer, global_step=global_step+1, episodes=args.final_evaluation_episodes)
+            evaluate_actor(actor, args.env_id, obs_norm, device=device, writer=writer, global_step=global_step+1, episodes=args.final_evaluation_episodes,fake_quantize_obs=args.fake_quantize_obs, quantize_initial_abs_max = [env.get_wrapper_attr("running_abs_max") for env in envs.envs][0] if args.fake_quantize_obs else None)
     
     
     envs.close()
@@ -628,6 +719,13 @@ if __name__ == "__main__":
             "obs_norm": obs_norm.state_dict()
         }, f"{args.save_path}/model_sac_{args.env_id}_{args.size}_{args.bits}_{args.seed}_{args.n}.pth")
         print('saved wnn model')
+        # if fake_quantize_obs is enabled, also save the running_abs_max of the quantizer for the observations
+        if args.fake_quantize_obs:
+            torch.save({
+                "running_abs_max": [env.get_wrapper_attr("running_abs_max") for env in envs.envs][0]
+            }, f"{args.save_path}/obs_quantizer_sac_{args.env_id}_{args.size}_{args.bits}_{args.seed}_{args.n}.pth")
+            print('saved obs quantizer stats')
+            
     if args.network_type == 'float':
         if obs_norm is None:
             obs_norm = ObsNorm(obs_shape, device=device)
